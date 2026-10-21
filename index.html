@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1a2b">
+<title>Assistant vocal</title>
+<style>
+:root{--bg:#0e1a2b;--panel:#16263c;--ink:#e8eef6;--mute:#8da2bb;--line:#243a57;--accent:#5eead4;--warn:#fbbf24;--bad:#f87171}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+#stage{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;padding:18px 0 8px}
+#orb{width:128px;height:128px;border-radius:50%;border:0;cursor:pointer;background:radial-gradient(circle at 35% 30%,#a7f3e6,#2dd4bf 45%,#0f766e);box-shadow:0 0 40px rgba(94,234,212,.35);transition:transform .2s,filter .3s}
+#orb.listening{animation:pulse 1.2s ease-in-out infinite;filter:saturate(1.3)}
+#orb.thinking{animation:spin 1.6s linear infinite;background:conic-gradient(from 0deg,#2dd4bf,#0e1a2b,#2dd4bf);box-shadow:0 0 30px rgba(94,234,212,.25)}
+#orb.speaking{animation:talk .5s ease-in-out infinite alternate;background:radial-gradient(circle at 35% 30%,#fde68a,#fbbf24 45%,#b45309);box-shadow:0 0 50px rgba(251,191,36,.4)}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.14)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes talk{from{transform:scale(.97)}to{transform:scale(1.1)}}
+@media (prefers-reduced-motion:reduce){#orb{animation:none!important}}
+#state{margin-top:12px;color:var(--mute);font-size:14px;min-height:21px}
+#log{flex:1;overflow-y:auto;padding:8px 14px;display:flex;flex-direction:column;gap:10px}
+.m{max-width:88%;padding:10px 13px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word}
+.u{align-self:flex-end;background:#1d4e5f;border-bottom-right-radius:4px}
+.a{align-self:flex-start;background:var(--panel);border-bottom-left-radius:4px}
+.code{position:relative;margin:8px 0 2px;background:#08111e;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.code pre{margin:0;padding:12px;overflow-x:auto;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre}
+.code button{position:absolute;top:6px;right:6px;background:var(--line);color:var(--ink);border:0;border-radius:6px;padding:4px 10px;font-size:12px}
+.card{align-self:stretch;border:1px solid var(--warn);border-radius:12px;padding:12px;background:#2a2410}
+.card b{color:var(--warn)}
+.card code{display:block;margin:8px 0;padding:8px;background:#08111e;border-radius:6px;font:13px ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+.card .row{display:flex;gap:8px}
+.card button{flex:1;padding:11px;border:0;border-radius:8px;font-size:15px;font-weight:600}
+.ok{background:var(--accent);color:#04201c}.no{background:var(--line);color:var(--ink)}
+.out{align-self:stretch;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--mute);background:#08111e;border-radius:8px;padding:8px;white-space:pre-wrap;max-height:140px;overflow:auto}
+#bar{display:flex;gap:8px;padding:10px 14px 14px;border-top:1px solid var(--line)}
+#txt{flex:1;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:22px;padding:11px 16px;font-size:16px}
+#lang{align-self:flex-end;margin:0 14px 6px 0;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;padding:6px 10px;font-size:14px}
+#send{width:46px;border:0;border-radius:50%;background:var(--accent);color:#04201c;font-size:20px}
+button:focus-visible,#txt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<div id="stage"><select id="lang" aria-label="Langue"><option value="fr">Français</option><option value="km">Shingazidja (approx.)</option></select><button id="orb" aria-label="Parler à l'assistant"></button><div id="state">Touchez la sphère, puis dites « Saïd »</div></div>
+<div id="log" aria-live="polite"></div>
+<div id="bar"><input id="txt" placeholder="Ou écrivez ici" autocomplete="off"><button id="send" aria-label="Envoyer">↑</button></div>
+<script>
+const $=id=>document.getElementById(id);
+const SID=Math.random().toString(36).slice(2);
+let token=localStorage.getItem('tok')||'';
+let convo=false, busy=false, rec=null;
+let LANG=localStorage.getItem('lang')||'fr';
+const SPEECH={fr:'fr-FR',km:'sw-KE'};
+const GREETINGS={fr:'Oui monsieur',km:'Labeka, bwana'};
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+
+function setState(s,label){$('orb').className=s;$('state').textContent=label}
+function esc(t){return t.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+
+const plain=t=>t.replace(/[*＊✱∗•`]+/g,'').replace(/^#+\s*/gm,'');
+function addMsg(text,cls){
+  const d=document.createElement('div');d.className='m '+cls;
+  text.split(/```/).forEach((part,i)=>{
+    if(i%2){
+      const code=part.replace(/^[^\n]*\n/,'');
+      const w=document.createElement('div');w.className='code';
+      w.innerHTML='<button>Copier</button><pre>'+esc(code.trim())+'</pre>';
+      w.querySelector('button').onclick=e=>{navigator.clipboard.writeText(code.trim());e.target.textContent='Copié'};
+      d.appendChild(w);
+    } else if(part.trim()){
+      const s=document.createElement('span');s.textContent=plain(part.trim());d.appendChild(s);
+    }
+  });
+  $('log').appendChild(d);$('log').scrollTop=1e9;
+}
+function addOut(t){const d=document.createElement('div');d.className='out';d.textContent=t;$('log').appendChild(d);$('log').scrollTop=1e9}
+
+async function api(path,body){
+  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Token':token},body:JSON.stringify({...body,lang:LANG})});
+  if(r.status===401){token=prompt("Code d'accès (ASSISTANT_TOKEN) :")||'';localStorage.setItem('tok',token);return api(path,body)}
+  return r.json();
+}
+
+function speak(text){
+  return new Promise(res=>{
+    const clean=plain(text).replace(/https?:\/\/\S+/g,'').replace(/```[\s\S]*?```/g,(LANG==='km'?' ':' Voici le code, affiché à l\'écran. '));
+    if(!clean.trim()||!window.speechSynthesis)return res();
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(clean);u.lang=SPEECH[LANG];
+    const v=speechSynthesis.getVoices().find(v=>v.lang.startsWith(SPEECH[LANG].slice(0,2)));if(v)u.voice=v;
+    u.onend=u.onerror=res;
+    setState('speaking','Je parle… (touchez pour interrompre)');
+    speechSynthesis.speak(u);
+  });
+}
+
+async function handle(res){
+  busy=false;
+  if(res.output)addOut(res.output);
+  if(res.type==='confirm'){
+    const c=document.createElement('div');c.className='card';
+    c.innerHTML='<b>Commande à valider</b><code></code><div class="row"><button class="no">Refuser</button><button class="ok">Exécuter</button></div>';
+    c.querySelector('code').textContent=res.command;
+    const done=async ok=>{c.remove();setState('thinking','Réflexion…');busy=true;handle(await api('/api/confirm',{sid:SID,approve:ok}))};
+    c.querySelector('.ok').onclick=()=>done(true);
+    c.querySelector('.no').onclick=()=>done(false);
+    $('log').appendChild(c);$('log').scrollTop=1e9;
+    setState('','Validation requise');
+    await speak(LANG==='km'?'':'Je veux exécuter une commande. Validez-la à l\'écran.');
+    setState('','Validation requise');
+    return;
+  }
+  addMsg(res.text,'a');
+  await speak(res.text);
+  if(convo)listen();else setState('','Touchez la sphère pour parler');
+}
+
+async function send(text){
+  if(!text.trim()||busy)return;
+  busy=true;addMsg(text,'u');setState('thinking','Réflexion…');
+  try{handle(await api('/api/chat',{sid:SID,text}))}
+  catch(e){busy=false;addMsg('Connexion au serveur impossible.','a');setState('','Erreur réseau')}
+}
+
+const NAME='Saïd', NAMES=['said','sa id','sayid','sayed','saeed','sahid','saied'];
+let awake=false;
+const norm=s=>s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+async function onHeard(t){
+  const n=norm(t), hit=NAMES.find(w=>n.includes(w));
+  if(!hit&&!awake){if(convo)listen();return}
+  awake=true;
+  let rest=t;
+  if(hit)rest=t.slice(n.indexOf(hit)+hit.length).replace(/^[\s,.!?:;-]+/,'');
+  if(hit){addMsg(NAME+' ?','u');const g=GREETINGS[LANG];addMsg(g,'a');await speak(g)}
+  if(rest.trim())send(rest);else listen();
+}
+function listen(){
+  if(!SR){setState('','Reconnaissance vocale non prise en charge ici : écrivez votre message');return}
+  rec=new SR();rec.lang=SPEECH[LANG];rec.interimResults=true;
+  let final='';
+  rec.onstart=()=>setState('listening',awake?'Je vous écoute…':'En veille : dites « '+NAME+' »');
+  rec.onresult=e=>{let t='';for(const r of e.results){t+=r[0].transcript;if(r.isFinal)final=t}
+    $('state').textContent=t};
+  rec.onerror=e=>{if(e.error!=='no-speech'){convo=false;setState('','Micro indisponible ('+e.error+')')}};
+  rec.onend=()=>{if(final)onHeard(final);else{awake=false;if(convo&&!busy)listen();else if(!busy)setState('','Touchez la sphère pour parler')}};
+  rec.start();
+}
+
+$('lang').value=LANG;
+$('lang').onchange=e=>{LANG=e.target.value;localStorage.setItem('lang',LANG);if(rec&&convo)rec.abort()};
+$('orb').onclick=()=>{
+  if(speechSynthesis.speaking){speechSynthesis.cancel();return}
+  if(convo){convo=false;rec&&rec.abort();setState('','Conversation arrêtée');return}
+  convo=true;listen();
+};
+$('send').onclick=()=>{send($('txt').value);$('txt').value=''};
+$('txt').onkeydown=e=>{if(e.key==='Enter'){send($('txt').value);$('txt').value=''}};
+if(!token){token=prompt("Code d'accès (ASSISTANT_TOKEN) :")||'';localStorage.setItem('tok',token)}
+</script>
+</body>
+</html>
